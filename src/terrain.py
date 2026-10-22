@@ -170,10 +170,37 @@ class TerrainGenerator:
 
     def generate_rough(
         self,
-        roughness: float = 0.03,
-        smoothness: int = 5,
+        roughness: float = 0.02,
+        smoothness: int = 15,
         rng: Optional[np.random.Generator] = None,
+        level: Optional[int] = None,
     ) -> np.ndarray:
+        """Generate smooth, physically traversable rough terrain with progressive levels.
+
+        Parameters:
+            roughness: Amplitude scaling of height variation [m].
+            smoothness: Filter kernel smoothing width.
+            rng: NumPy random Generator for reproducible evaluation.
+            level: Optional progressive difficulty level (1 to 4):
+                   Level 1: Gentle rolling waves (amplitude ~0.010m, smoothness=21)
+                   Level 2: Mild undulations (amplitude ~0.018m, smoothness=17)
+                   Level 3: Moderate roughness (amplitude ~0.026m, smoothness=13)
+                   Level 4: Harder uneven terrain (amplitude ~0.035m, smoothness=11)
+        """
+        if level is not None:
+            if level == 1:
+                roughness, smoothness = 0.010, 21
+            elif level == 2:
+                roughness, smoothness = 0.018, 17
+            elif level == 3:
+                roughness, smoothness = 0.026, 13
+            elif level == 4:
+                roughness, smoothness = 0.035, 11
+            else:
+                level_clamped = int(np.clip(level, 1, 4))
+                roughness = 0.010 + 0.008 * (level_clamped - 1)
+                smoothness = max(9, 21 - 3 * (level_clamped - 1))
+
         if roughness < 0:
             raise ValueError("roughness must be non-negative")
         if smoothness < 1:
@@ -182,27 +209,33 @@ class TerrainGenerator:
             rng = np.random.default_rng()
 
         self.current_type = "rough"
-        self.current_params = {"roughness": float(roughness), "smoothness": int(smoothness)}
+        self.current_params = {
+            "roughness": float(roughness),
+            "smoothness": int(smoothness),
+            "level": level,
+        }
         z_center = 0.08
 
+        # Broad noise provides rolling landscape; fine noise provides gentle texture
         broad = rng.normal(0.0, 1.0, size=(self.nrow, self.ncol)).astype(np.float32)
         fine = rng.normal(0.0, 1.0, size=(self.nrow, self.ncol)).astype(np.float32)
 
         def smooth_noise(field: np.ndarray, width: int) -> np.ndarray:
             width = max(3, int(width) | 1)
             kernel = np.ones(width, dtype=np.float32) / width
+            # 2D separable box filtering (mode='same') avoids edge spikes
             out = np.apply_along_axis(lambda m: np.convolve(m, kernel, mode="same"), 0, field)
             out = np.apply_along_axis(lambda m: np.convolve(m, kernel, mode="same"), 1, out)
             out_std = float(np.std(out))
             return out / max(out_std, 1e-6)
 
-        broad = smooth_noise(broad, max(9, smoothness * 3))
-        fine = smooth_noise(fine, max(3, smoothness))
-        filtered = roughness * (0.70 * broad + 0.30 * fine)
+        # Use broad spatial filtering to eliminate isolated needle-like peaks
+        broad = smooth_noise(broad, max(15, smoothness * 2))
+        fine = smooth_noise(fine, max(5, smoothness))
+        # 85% broad rolling features + 15% mild variations
+        filtered = float(roughness) * (0.85 * broad + 0.15 * fine)
 
-        # Apply continuous roughness across the entire terrain including spawn area
         z = z_center + filtered
-
         self._elevation_meters = np.clip(z, 0.0, self.max_height).astype(np.float32)
         return self._finish()
 
@@ -255,7 +288,7 @@ class TerrainGenerator:
 class DiscreteTerrain:
     """Analytical queries for discrete rigid MuJoCo scenes (flat, slope, stairs)."""
 
-    def __init__(self, terrain_type: str = "flat", step_width: float = 0.35, step_height: float = 0.08, pitch_deg: float = 10.0):
+    def __init__(self, terrain_type: str = "flat", step_width: float = 0.45, step_height: float = 0.08, pitch_deg: float = 10.0):
         self.current_type = terrain_type
         self.step_width = float(step_width)
         self.step_height = float(step_height)
@@ -281,29 +314,29 @@ class DiscreteTerrain:
             nz = math.cos(theta)
             return -(nx / nz) * float(x)
         elif self.current_type == "stairs":
-            # Discrete steps along X: step_width=0.35m, step_height=0.08m
-            # Ground: x < -0.525 -> z = 0.0
-            # step_n1: [-0.525, -0.175], top = 0.080
-            # step_0:  [-0.175,  0.175], top = 0.160
-            # step_1:  [ 0.175,  0.525], top = 0.240
-            # step_2:  [ 0.525,  0.875], top = 0.320
-            # step_3:  [ 0.875,  1.225], top = 0.400
-            # step_4:  [ 1.225,  1.575], top = 0.480
-            # step_5:  [ 1.575,  3.275], top = 0.560
+            # Discrete steps along X: step_width=0.45m, step_height=0.08m
+            # Ground: x < -0.675 -> z = 0.0
+            # step_n1: [-0.675, -0.225], top = 0.080
+            # step_0:  [-0.225,  0.225], top = 0.160
+            # step_1:  [ 0.225,  0.675], top = 0.240
+            # step_2:  [ 0.675,  1.125], top = 0.320
+            # step_3:  [ 1.125,  1.575], top = 0.400
+            # step_4:  [ 1.575,  2.025], top = 0.480
+            # step_5:  [ 2.025,  3.725], top = 0.560
             x_f = float(x)
-            if x_f < -0.525:
+            if x_f < -0.675:
                 return 0.0
-            elif x_f < -0.175:
+            elif x_f < -0.225:
                 return 0.080
-            elif x_f < 0.175:
+            elif x_f < 0.225:
                 return 0.160
-            elif x_f < 0.525:
+            elif x_f < 0.675:
                 return 0.240
-            elif x_f < 0.875:
+            elif x_f < 1.125:
                 return 0.320
-            elif x_f < 1.225:
-                return 0.400
             elif x_f < 1.575:
+                return 0.400
+            elif x_f < 2.025:
                 return 0.480
             else:
                 return 0.560

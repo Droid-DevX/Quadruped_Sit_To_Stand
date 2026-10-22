@@ -15,7 +15,6 @@ from environment import A1SitToStandEnv
 
 
 def print_contact_diagnostics(env: A1SitToStandEnv):
-    """Print collision and contact metrics between robot and terrain."""
     model = env.model
     data  = env.data
     ncon  = data.ncon
@@ -34,7 +33,6 @@ def print_contact_diagnostics(env: A1SitToStandEnv):
     print(f"  Base Height (h_rel): {h_rel:.4f} m (Crouch target: {env.crouch_height_init:.3f} m)")
     print(f"  Terrain Normal     : [{normal[0]:.3f}, {normal[1]:.3f}, {normal[2]:.3f}]")
 
-    # Joint positions
     q = env._get_joint_pos()
     print(f"  Joint Positions [rad]:")
     leg_names = ["FR", "FL", "RR", "RL"]
@@ -77,9 +75,7 @@ def print_contact_diagnostics(env: A1SitToStandEnv):
     print("=" * 60 + "\n")
 
 
-
 def get_runtime_contact_diagnostics(env: A1SitToStandEnv):
-    """Summarize actual MuJoCo contacts between robot geoms and terrain."""
     model, data = env.model, env.data
     terrain_ids = env._terrain_geom_ids
     trunk_id = int(getattr(env, "_trunk_contact_geom_id", -1))
@@ -125,7 +121,6 @@ def get_runtime_contact_diagnostics(env: A1SitToStandEnv):
 
 
 def print_runtime_contact_diagnostics(step: int, diag: dict):
-    """Print compact contact state during HOLD-SIT."""
     min_dist = diag["min_terrain_dist"]
     min_text = "none" if not np.isfinite(min_dist) else f"{min_dist * 1000:+.2f}mm"
     print(
@@ -135,7 +130,6 @@ def print_runtime_contact_diagnostics(step: int, diag: dict):
         f"{diag['n_foot_contacts']}/{diag['n_trunk_contacts']} "
         f"min_dist={min_text}"
     )
-    # Print names for contacts, including negative distances that indicate penetration.
     pairs = diag["terrain_pairs"]
     if pairs:
         details = ", ".join(f"{name}:{dist*1000:+.2f}mm" for name, _, dist in pairs[:8])
@@ -182,7 +176,7 @@ def main():
                     finite_obs = bool(np.all(np.isfinite(check_env._get_obs())))
                     yaw_deg = math.degrees(info.get('initial_yaw_rad', 0.0))
                     
-                    # Verify physical contact: must have non-infinite contact distance and negligible penetration (<0.1mm)
+                    # Verify physical contact: must have finite contact distance and negligible penetration (<0.1mm)
                     valid = spawn_ok and (pen_mm <= 0.10) and finite_obs
                     print(f"  ep={episode+1:02d} valid={valid} "
                           f"min_dist={min_dist*1000:+.2f}mm pen={pen_mm:.2f}mm "
@@ -202,7 +196,6 @@ def main():
     if args.step and mode == "random":
         mode = "hold-sit"
 
-    # Rendering is opt-in. Headless mode is safer for automated checks and remote terminals.
     if not args.render and not args.interactive:
         print(f"Initializing A1 environment on '{args.terrain}' terrain (headless diagnostics, seed={args.seed})...")
         env = A1SitToStandEnv(
@@ -225,7 +218,6 @@ def main():
 
     print(f"Initializing A1 environment on '{args.terrain}' terrain (seed={args.seed}, mode={mode})...")
 
-    # The passive viewer is used for --render; --interactive launches MuJoCo's full GUI.
     render_mode = "human" if args.render and not args.interactive else None
     env = A1SitToStandEnv(
         terrain_type=args.terrain,
@@ -258,13 +250,6 @@ def main():
             mujoco.viewer.launch(env.model, env.data)
         else:
             print(f"Launching passive viewer window (Mode: {mode.upper()})...")
-            print("  - Robot starts in the initial pose configured by environment.reset().")
-            print("  - HOLD-SIT bypasses env.step() and the sit-to-stand reference trajectory.")
-            print("  - It commands the fixed env._crouch_q joint target through the PD controller.")
-            print("  - Runtime terrain contacts are logged every 25 control steps.")
-            print(f"  - Taking {mode.upper()} actions step-by-step in real time (50 FPS).")
-            print("  - Close the viewer window to exit.\n")
-
             env.render()
 
             if env._viewer is None:
@@ -293,7 +278,6 @@ def main():
                 z0_floor = env.terrain.get_height(pos0[0], pos0[1])
                 print(f"  Spawned at: Base Height = {pos0[2]:.4f} m (h_rel = {pos0[2] - z0_floor:.4f} m) [SITTING]")
 
-                # Render initial sit frame and pause briefly so user clearly sees the sitting posture
                 env.render()
                 time.sleep(0.5)
 
@@ -303,19 +287,15 @@ def main():
 
                 while env._viewer is not None and env._viewer.is_running() and not done:
                     if mode == "random":
-                        # Sample random action in [-1, 1]^12
                         action = env.action_space.sample()
                         obs, reward, terminated, truncated, step_info = env.step(action)
                     elif mode == "stand":
-                        # Action 0 corresponds to nominal standing target joints
                         action = np.zeros(12, dtype=np.float32)
                         obs, reward, terminated, truncated, step_info = env.step(action)
                     elif mode == "zero":
                         action = np.zeros(12, dtype=np.float32)
                         obs, reward, terminated, truncated, step_info = env.step(action)
                     elif mode == "hold-sit":
-                        # Diagnostic-only controller: fixed sit joint target, no env.step(),
-                        # no nominal rise trajectory, and no policy action residual.
                         q = env._get_joint_pos()
                         qdot = env._get_joint_vel()
                         tau = env._pd.compute(crouch_q, q, qdot)

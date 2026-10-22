@@ -18,20 +18,20 @@
     <geom name="terrain" type="plane" size="5 5 0.1" pos="0 0 0" material="groundplane" condim="3"
       friction="0.8 0.02 0.01" solimp="0.99 0.999 0.0005 0.5 2" solref="0.002 1"/>
 
-    <!-- Discrete rigid stairs: Width 0.35m, Height 0.08m -->
-    <geom name="step_n1" type="box" size="0.175 2.5 0.040" pos="-0.35 0 0.040" material="step_mat" condim="3"
+    <!-- Discrete rigid stairs: width along Y reduced from 5.0m to 2.5m; tread depth 0.45m, height 0.08m -->
+    <geom name="step_n1" type="box" size="0.225 1.25 0.040" pos="-0.45 0 0.040" material="step_mat" condim="3"
       friction="0.8 0.02 0.01" solimp="0.99 0.999 0.0005 0.5 2" solref="0.002 1"/>
-    <geom name="step_0" type="box" size="0.175 2.5 0.080" pos="0.00 0 0.080" material="step_mat" condim="3"
+    <geom name="step_0" type="box" size="0.225 1.25 0.080" pos="0.00 0 0.080" material="step_mat" condim="3"
       friction="0.8 0.02 0.01" solimp="0.99 0.999 0.0005 0.5 2" solref="0.002 1"/>
-    <geom name="step_1" type="box" size="0.175 2.5 0.120" pos="0.35 0 0.120" material="step_mat" condim="3"
+    <geom name="step_1" type="box" size="0.225 1.25 0.120" pos="0.45 0 0.120" material="step_mat" condim="3"
       friction="0.8 0.02 0.01" solimp="0.99 0.999 0.0005 0.5 2" solref="0.002 1"/>
-    <geom name="step_2" type="box" size="0.175 2.5 0.160" pos="0.70 0 0.160" material="step_mat" condim="3"
+    <geom name="step_2" type="box" size="0.225 1.25 0.160" pos="0.90 0 0.160" material="step_mat" condim="3"
       friction="0.8 0.02 0.01" solimp="0.99 0.999 0.0005 0.5 2" solref="0.002 1"/>
-    <geom name="step_3" type="box" size="0.175 2.5 0.200" pos="1.05 0 0.200" material="step_mat" condim="3"
+    <geom name="step_3" type="box" size="0.225 1.25 0.200" pos="1.35 0 0.200" material="step_mat" condim="3"
       friction="0.8 0.02 0.01" solimp="0.99 0.999 0.0005 0.5 2" solref="0.002 1"/>
-    <geom name="step_4" type="box" size="0.175 2.5 0.240" pos="1.40 0 0.240" material="step_mat" condim="3"
-      friction="0.8 0.02 0.01" solimp="0.99 0.999 0.0005 0.5 2" solref="0.002 1"/>
-    <geom name="step_5" type="box" size="0.85 2.5 0.280" pos="2.425 0 0.280" material="step_mat" condim="3"
+    <geom name="step_4" type="box" size="0.225 1.25 0.240" pos="1.80 0 0.240" material="step_mat" condim="3"
+      friction="0.8 0.02 0.01" solimp="0.99 0.999 0.0005 0.5 2" solref="0.002 1" />
+    <geom name="step_5" type="box" size="0.85 1.25 0.280" pos="2.875 0 0.280" material="step_mat" condim="3"
       friction="0.8 0.02 0.01" solimp="0.99 0.999 0.0005 0.5 2" solref="0.002 1"/>
   </worldbody>
 </mujoco>

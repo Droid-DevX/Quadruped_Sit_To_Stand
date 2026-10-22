@@ -493,17 +493,18 @@ class A1SitToStandEnv(gym.Env):
             roll  = float(self._rng.uniform(-max_roll, max_roll))
             self.terrain.generate_slope(pitch_deg=pitch, roll_deg=roll)
         elif selected == "stairs":
-            # 6.3 cm at training level 1.0; 7 cm at OOD level 1.2.
-            # The staircase has no wide central landing: the robot is reset on
-            # a real tread so this task exercises stair-ground interactions.
-            step_h = float(np.clip(0.03 + (1.0 / 30.0) * lvl, 0.03, 0.07))
-            step_w = 0.40
+            step_h = float(np.clip(0.04 + 0.04 * lvl, 0.04, 0.08))
+            step_w = 0.45
             direction = self._rng.choice(["up", "down"])
             self.terrain.generate_stairs(step_height=step_h, step_width=step_w, direction=direction)
         elif selected == "rough":
-            # 5 cm at training level 1.0; 5.7 cm for OOD level 1.2.
-            roughness = float(np.clip(0.015 + 0.035 * lvl, 0.015, 0.057))
-            self.terrain.generate_rough(roughness=roughness, rng=self._rng)
+            # Map curriculum level in [0.0, 1.0] to 4 progressive difficulty stages:
+            # Level 1 (lvl <= 0.25): gentle rolling waves, roughness ~0.010, smoothness 21
+            # Level 2 (lvl <= 0.50): mild undulations, roughness ~0.018, smoothness 17
+            # Level 3 (lvl <= 0.75): moderate roughness, roughness ~0.026, smoothness 13
+            # Level 4 (lvl > 0.75): harder uneven terrain, roughness ~0.035, smoothness 11
+            diff_level = int(np.clip(math.floor(lvl * 4) + 1, 1, 4))
+            self.terrain.generate_rough(level=diff_level, rng=self._rng)
 
         # Update MuJoCo heightfield data in place if model has hfield
         if hasattr(self.model, "hfield_data") and self.model.nhfield > 0:
@@ -518,45 +519,42 @@ class A1SitToStandEnv(gym.Env):
         self._apply_domain_randomization()
         self._setup_terrain()
 
-        # Randomized start position. Stair resets are placed on the central
-        # tread; other terrains start in the central, unclipped patch. The base
-        # height is set geometrically below and is never adjusted by contact search.
-        # Randomized start position. Stair resets are placed centered on a
-        # tread; other terrains start in the central unclipped patch.
+        # Randomized start position.
+        # Staircase travels/ascends along +X.
+        # Requirement: Front two legs rest on the upper step, rear two legs rest on the lower step.
+        # Base is placed at tread_index * step_w + 0.05m so that rear paws rest securely on step k
+        # and front paws reach across to step k+1.
         if self.terrain.current_type == "stairs":
-            step_w = float(self.terrain.current_params["step_width"])
+            step_w = float(self.terrain.current_params.get("step_width", 0.45))
             tread_index = int(self._rng.integers(-1, 2))
-            # Keep x0 tightly centered on the tread (+/- 3mm jitter) because sitting
-            # footprint width (328mm) leaves ~11mm clearance on either side of 350mm tread.
-            x0 = float(tread_index * step_w + self._rng.uniform(-0.003, 0.003))
+            x0 = float(tread_index * step_w + 0.050 + self._rng.uniform(-0.005, 0.005))
             y0 = float(self._rng.uniform(-0.08, 0.08))
+            # On stairs spanning two steps, trunk has natural pitch ~10 deg up to bridge the 8cm step height
+            stair_pitch_rad = float(-math.radians(10.0))
         else:
             x0 = float(self._rng.uniform(-0.12, 0.12))
             y0 = float(self._rng.uniform(-0.12, 0.12))
+            stair_pitch_rad = 0.0
         z_floor = self.terrain.get_height(x0, y0)
         normal = self.terrain.get_normal(x0, y0)
 
         # Orientation:
-        # On stairs, keep the trunk strictly aligned to tread edges (+/-90 deg with max 0.5 deg jitter)
-        # and zero roll/pitch tilt so all paws cleanly fit on the tread without colliding risers.
+        # On stairs, align the robot's forward axis (+X) directly with the staircase direction
+        # of travel (yaw = 0.0 deg with small jitter) and pitch tilted up to bridge the step.
         # On flat, slope, and rough terrain, yaw is randomized uniformly across full [-pi, pi].
         if self.terrain.current_type == "stairs":
-            yaw = float((math.pi / 2.0) + self._rng.uniform(-math.radians(0.5), math.radians(0.5)))
-            if self._rng.random() < 0.5:
-                yaw = float(yaw - math.pi)
-            tilt_deg = 0.0
+            yaw = float(self._rng.uniform(-math.radians(2.0), math.radians(2.0)))
+            base_quat = align_quat_to_normal(normal, yaw)
+            base_quat = _quat_multiply(base_quat, _euler_quat(0.0, stair_pitch_rad))
+            roll_perturb = 0.0
+            pitch_perturb = stair_pitch_rad
         else:
             yaw = float(self._rng.uniform(-math.pi, math.pi))
             tilt_deg = 2.0
-
-        base_quat = align_quat_to_normal(normal, yaw)
-        if tilt_deg > 0.0:
+            base_quat = align_quat_to_normal(normal, yaw)
             roll_perturb = float(self._rng.uniform(math.radians(-tilt_deg), math.radians(tilt_deg)))
             pitch_perturb = float(self._rng.uniform(math.radians(-tilt_deg), math.radians(tilt_deg)))
             base_quat = _quat_multiply(base_quat, _euler_quat(roll_perturb, pitch_perturb))
-        else:
-            roll_perturb = 0.0
-            pitch_perturb = 0.0
 
         # ---------------------------------------------------------------
         # Geometry-informed placement followed by physics-level verification:
@@ -568,6 +566,14 @@ class A1SitToStandEnv(gym.Env):
         sit_qpos[0], sit_qpos[1] = x0, y0
         sit_qpos[2] = z_floor + 0.50
         sit_qpos[3:7] = base_quat
+        if self.terrain.current_type == "stairs":
+            # Adjust front leg joint targets in sitting pose so front paws rest on the upper step
+            # FR leg (indices 7, 8): thigh +1.07 rad, calf -2.60 rad
+            # FL leg (indices 10, 11): thigh +1.07 rad, calf -2.60 rad
+            sit_qpos[7 + 1] = 1.07
+            sit_qpos[7 + 2] = -2.60
+            sit_qpos[7 + 4] = 1.07
+            sit_qpos[7 + 5] = -2.60
         sit_qpos[7:] = np.clip(sit_qpos[7:], _JOINT_LO, _JOINT_HI)
         self.data.qpos[:] = sit_qpos
         self.data.qvel[:] = 0.0
@@ -883,7 +889,9 @@ class A1SitToStandEnv(gym.Env):
                          if self._first_stand_step is not None else None)
         stability_sec = self._stable_steps * _CONTROL_DT
         rise_in_spec = (rise_time_sec is not None and 2.0 <= rise_time_sec <= 5.0)
-        success = bool(rise_in_spec and self._stable_steps >= _STABILITY_STEPS and t_sec <= 5.0)
+        # Success criteria: Valid rise initiated between 2.0s and 5.0s, followed by
+        # 1.0s (50 consecutive steps) of stable standing.
+        success = bool(rise_in_spec and self._stable_steps >= _STABILITY_STEPS)
         self._success = success
 
         fallen = self._is_fallen(h_rel, cos_align)
