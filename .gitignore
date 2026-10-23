@@ -46,3 +46,4 @@ output/logs/
 output/videos/
 output/eval_results/
 output/vecnorm_stats/
+output/best_model/
