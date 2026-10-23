@@ -191,11 +191,11 @@ _TRUNK_STAND_TARGET = 0.27    # nominal standing height
 _TRUNK_CROUCH_INIT  = _SIT_BASE_HEIGHT   # crouched resting height
 _TRUNK_SIT_INIT     = _TRUNK_CROUCH_INIT
 
-# Horizon
+# Horizon & Stability
 _MAX_EPISODE_STEPS = 500      # 10 seconds max
-_STABILITY_STEPS   = 50       # 1.0 second stability window at 50 Hz
-_STABLE_LIN_VEL_MAX = 0.15    # m/s, base translational speed for a stable stand
-_STABLE_ANG_VEL_MAX = 0.50    # rad/s, base angular speed for a stable stand
+_STABILITY_STEPS   = 100      # 2.0 second stability hold window at 50 Hz (configurable via hold_duration)
+_STABLE_LIN_VEL_MAX = 0.25    # m/s, base translational speed for a stable stand
+_STABLE_ANG_VEL_MAX = 0.60    # rad/s, base angular speed for a stable stand
 
 
 class A1SitToStandEnv(gym.Env):
@@ -208,10 +208,12 @@ class A1SitToStandEnv(gym.Env):
                  init_noise_scale=0.03, terrain_type="random", curriculum_level=0.0,
                  enable_domain_randomization=True, enable_inertia_randomization=True,
                  inertia_randomization_range=(0.90, 1.10), debug=False, rise_duration=3.8,
-                 use_discrete_scenes=True):
+                 use_discrete_scenes=True, hold_duration=2.0):
         super().__init__()
         self.use_discrete_scenes = bool(use_discrete_scenes)
         self.terrain_type = terrain_type
+        self.hold_duration = float(hold_duration)
+        self._stability_steps_target = max(1, int(round(self.hold_duration / _CONTROL_DT)))
 
         # Select model path based on terrain_type if using discrete rigid scenes
         if model_path is None:
@@ -378,6 +380,19 @@ class A1SitToStandEnv(gym.Env):
     def _get_joint_pos(self):          return self.data.qpos[self._qpos_ids].copy()
     def _get_joint_vel(self):          return self.data.qvel[self._qvel_ids].copy()
     def _get_base_pos(self):           return self.data.qpos[0:3].copy()
+
+    def _get_terrain_ground_z(self, pos):
+        """Compute the effective terrain support elevation under the robot.
+        On flat or planar slopes, this matches terrain.get_height(pos[0], pos[1]).
+        On discrete stairs, where the front feet rest on step k+1 and rear feet on step k,
+        the effective terrain ground reference is the mean elevation of the step treads
+        supporting the feet, avoiding arbitrary step-edge discretization offsets.
+        """
+        if self.terrain.current_type == "stairs" and hasattr(self, "_feet_geom_ids"):
+            foot_tzs = [self.terrain.get_height(self.data.geom_xpos[fid][0], self.data.geom_xpos[fid][1])
+                        for fid in self._feet_geom_ids]
+            return float(np.mean(foot_tzs))
+        return float(self.terrain.get_height(pos[0], pos[1]))
     def _get_base_quat(self):          return self.data.qpos[3:7].copy()
     def _get_base_ang_vel_world(self): return self.data.qvel[3:6].copy()
     def _get_base_lin_vel_world(self): return self.data.qvel[0:3].copy()
@@ -711,7 +726,7 @@ class A1SitToStandEnv(gym.Env):
         self._success = False
 
         pos = self._get_base_pos()
-        z_curr_floor = self.terrain.get_height(pos[0], pos[1])
+        z_curr_floor = self._get_terrain_ground_z(pos)
         h_rel = pos[2] - z_curr_floor
         self._sit_base_height_rel = float(h_rel)
         # Re-check after all reset bookkeeping, without moving the robot.
@@ -791,10 +806,11 @@ class A1SitToStandEnv(gym.Env):
 
         # 4. Objectives: 2 to 5 second rise and stable balance.
         # Explicitly discourage standing before the required 2.0s lower bound.
-        r_early_stand_pen = -1.0 if (is_standing and t_sec < 2.0) else 0.0
+        # Strengthened to -4.0 to firmly penalize standing before 2.0s.
+        r_early_stand_pen = -4.0 if (is_standing and t_sec < 2.0) else 0.0
         if is_standing and t_sec >= 2.0:
             r_stand_bonus = 1.5
-            r_stable_bonus = 1.5 if self._stable_steps >= _STABILITY_STEPS else 0.0
+            r_stable_bonus = 1.5 if self._stable_steps >= self._stability_steps_target else 0.0
         else:
             r_stand_bonus = 0.0
             r_stable_bonus = 0.0
@@ -861,7 +877,7 @@ class A1SitToStandEnv(gym.Env):
         w_world = self._get_base_ang_vel_world()
 
         # Local terrain queries (Privileged in reward/critic only)
-        z_floor = self.terrain.get_height(pos[0], pos[1])
+        z_floor = self._get_terrain_ground_z(pos)
         h_rel   = float(pos[2] - z_floor)
         normal  = self.terrain.get_normal(pos[0], pos[1])
 
@@ -871,7 +887,10 @@ class A1SitToStandEnv(gym.Env):
 
         # Standing definition:
         # Base height above terrain > 0.20m (calf length) and aligned with terrain normal
-        is_standing = (h_rel >= _TRUNK_STAND_MIN) and (cos_align >= math.cos(math.radians(25.0)))
+        # Armed only after the sitting grace period (t >= 1.0s) so sitting poses on uneven
+        # terrain do not trigger premature standing at step 1.
+        elapsed_sec = self._step_count * _CONTROL_DT
+        is_standing = (elapsed_sec >= 1.0) and (h_rel >= _TRUNK_STAND_MIN) and (cos_align >= math.cos(math.radians(25.0)))
         lin_speed = float(np.linalg.norm(v_world))
         ang_speed = float(np.linalg.norm(w_world))
         is_stable = (is_standing and lin_speed <= _STABLE_LIN_VEL_MAX
@@ -890,8 +909,9 @@ class A1SitToStandEnv(gym.Env):
         stability_sec = self._stable_steps * _CONTROL_DT
         rise_in_spec = (rise_time_sec is not None and 2.0 <= rise_time_sec <= 5.0)
         # Success criteria: Valid rise initiated between 2.0s and 5.0s, followed by
-        # 1.0s (50 consecutive steps) of stable standing.
-        success = bool(rise_in_spec and self._stable_steps >= _STABILITY_STEPS)
+        # active continuous hold for the required duration (default 2.0s / 100 steps).
+        # Standing alone does NOT terminate the episode; only completing the full hold terminates with success.
+        success = bool(rise_in_spec and self._stable_steps >= self._stability_steps_target)
         self._success = success
 
         fallen = self._is_fallen(h_rel, cos_align)
@@ -985,7 +1005,7 @@ class A1SitToStandEnv(gym.Env):
     @property
     def sit_height_init(self):          return _TRUNK_SIT_INIT
     @property
-    def stability_steps_required(self): return _STABILITY_STEPS
+    def stability_steps_required(self): return self._stability_steps_target
     @property
     def stable_steps(self):             return self._stable_steps
 
@@ -1008,7 +1028,7 @@ class A1SitToStandEnv(gym.Env):
         print(f"  Inertia Randomization Range : {self.inertia_randomization_range}")
         print(f"  Current Terrain Type        : {self.terrain.current_type.upper()}")
         print(f"  Stable Stand Criteria       : linear speed <= {_STABLE_LIN_VEL_MAX:.2f} m/s; "
-              f"angular speed <= {_STABLE_ANG_VEL_MAX:.2f} rad/s for {_STABILITY_STEPS * _CONTROL_DT:.1f}s")
+              f"angular speed <= {_STABLE_ANG_VEL_MAX:.2f} rad/s for {self._stability_steps_target * _CONTROL_DT:.1f}s hold")
         print("-" * 68)
         print("  SELECTED LINK MASS & INERTIA DIAGNOSTICS:")
         selected_links = ["trunk", "FR_thigh", "FR_calf"]

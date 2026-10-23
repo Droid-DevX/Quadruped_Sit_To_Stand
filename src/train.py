@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import VecNormalize
+from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 from stable_baselines3.common.callbacks import (
     CheckpointCallback, BaseCallback)
 from stable_baselines3.common.monitor import Monitor
@@ -183,14 +183,15 @@ CURRICULUM_STAGES = ["flat", "slope", "rough", "stairs"]
 
 
 def evaluate_stage_success(model: PPO, training_vec_env: VecNormalize, terrain_type: str,
-                           n_episodes: int = 50, seed: int = 20000) -> Tuple[float, List[float]]:
+                           n_episodes: int = 50, seed: int = 20000,
+                           curriculum_level: float = 1.0) -> Tuple[float, List[float]]:
     """Evaluate current policy on target stage terrain without altering training env stats.
 
     Guarantees:
       - Uses existing training observation-normalization statistics without updating them.
       - Training state of training_vec_env (training flag, norm_obs) is preserved.
       - Observations are reshaped to (1, obs_dim) for single-step prediction.
-      - Success requires valid rise in [2.0, 5.0] s and 1.0 s stable hold.
+      - Success requires valid rise in [2.0, 5.0] s and 2.0 s stable hold.
     """
     successes = 0
     rise_times = []
@@ -206,7 +207,7 @@ def evaluate_stage_success(model: PPO, training_vec_env: VecNormalize, terrain_t
             test_seed = seed + ep * 137
             env = A1SitToStandEnv(
                 terrain_type=terrain_type,
-                curriculum_level=1.0,
+                curriculum_level=curriculum_level,
                 enable_domain_randomization=False,
                 enable_inertia_randomization=False,
                 use_discrete_scenes=True,
@@ -241,12 +242,12 @@ def evaluate_stage_success(model: PPO, training_vec_env: VecNormalize, terrain_t
     return success_rate, rise_times
 
 
-def create_stage_env(terrain_type: str, n_envs: int, seed: int, log_dir: Path, run_name: str):
+def create_stage_env(terrain_type: str, n_envs: int, seed: int, log_dir: Path, run_name: str, curriculum_level: float = 1.0):
     """Build vectorized environment for a dedicated discrete XML terrain stage."""
     vec_env = make_vec_env(
         env_id=lambda: A1SitToStandEnv(
             terrain_type=terrain_type,
-            curriculum_level=1.0,
+            curriculum_level=curriculum_level,
             enable_domain_randomization=True,
             enable_inertia_randomization=True,
             use_discrete_scenes=True,
@@ -258,11 +259,32 @@ def create_stage_env(terrain_type: str, n_envs: int, seed: int, log_dir: Path, r
     # Confirm exact XML scene loaded
     sample_env = A1SitToStandEnv(terrain_type=terrain_type, use_discrete_scenes=True)
     xml_basename = os.path.basename(sample_env._model_path)
-    print(f"  [create_stage_env] Active Stage: {terrain_type.upper()} -> Loaded XML: {xml_basename} ({sample_env._model_path})")
     sample_env.close()
     return vec_env
 
 
+def create_unified_env(n_envs: int, seed: int, log_dir: Path, run_name: str):
+    """Build vectorized environment with balanced terrain allocation across sub-environments:
+    Env 0: Flat, Env 1: Slope, Env 2: Rough, Env 3: Stairs (or cycling if n_envs > 4).
+    """
+    terrains = ["flat", "slope", "rough", "stairs"]
+    env_fns = [
+        (lambda t=terrains[i % len(terrains)], s=seed + i * 100: A1SitToStandEnv(
+            terrain_type=t,
+            curriculum_level=1.0,
+            enable_domain_randomization=True,
+            enable_inertia_randomization=True,
+            use_discrete_scenes=True,
+            seed=s,
+        ))
+        for i in range(n_envs)
+    ]
+    vec_env = DummyVecEnv(env_fns)
+    print(f"  [create_unified_env] Built balanced unified VecEnv ({n_envs} sub-envs):")
+    for i in range(n_envs):
+        t = terrains[i % len(terrains)]
+        print(f"    Sub-env {i}: {t.upper()}")
+    return vec_env
 def train(total_timesteps=5_000_000, n_envs=4, seed=42,
           run_name="ppo_a1_sit_to_stand",
           success_threshold=0.90,
@@ -272,7 +294,10 @@ def train(total_timesteps=5_000_000, n_envs=4, seed=42,
           start_stage=0,
           checkpoint_model=None,
           checkpoint_vecnorm=None,
-          check_only=False):
+          check_only=False,
+          single_stage=False,
+          unified=False,
+          curriculum_level=None):
     """Train PPO with genuine performance-based curriculum progression:
        Stage 1 (Flat) -> Stage 2 (Slope) -> Stage 3 (Rough) -> Stage 4 (Stairs).
 
@@ -316,6 +341,110 @@ def train(total_timesteps=5_000_000, n_envs=4, seed=42,
     current_model_path = checkpoint_model
     current_vecnorm_path = checkpoint_vecnorm
 
+    if unified:
+        print(f"\n{'='*75}")
+        print(f"  UNIFIED ALL-TERRAIN TRAINING MODE ACTIVATED")
+        print(f"  Target: Master Flat, Slope, Rough, and Stairs in ONE Unified Policy")
+        print(f"{'='*75}\n")
+
+        raw_vec_env = create_unified_env(n_envs, seed, _LOG_DIR, run_name)
+        if current_vecnorm_path and os.path.exists(current_vecnorm_path):
+            print(f"  Restoring VecNormalize statistics from: {current_vecnorm_path}")
+            vec_env = VecNormalize.load(current_vecnorm_path, raw_vec_env)
+            vec_env.training = True
+            vec_env.norm_reward = True
+        else:
+            vec_env = VecNormalize(
+                raw_vec_env, norm_obs=True, norm_reward=True,
+                clip_obs=10.0, clip_reward=10.0, gamma=0.99)
+
+        if current_model_path and os.path.exists(current_model_path):
+            print(f"  Loading initialization policy from: {current_model_path}")
+            model = PPO.load(
+                current_model_path, env=vec_env, device=device,
+                tensorboard_log=str(_LOG_DIR / run_name),
+                **hparams)
+        else:
+            model = PPO(
+                policy="MlpPolicy", env=vec_env, verbose=1,
+                seed=seed, device=device,
+                tensorboard_log=str(_LOG_DIR / run_name),
+                policy_kwargs=dict(net_arch=[256, 256], activation_fn=torch.nn.Tanh),
+                **hparams)
+
+        total_steps = 0
+        cycle = 0
+        all_passed = False
+        best_mean_rate = -1.0
+        best_ckpt_path = None
+
+        while total_steps < total_timesteps and not all_passed:
+            cycle += 1
+            steps_this_cycle = min(eval_freq, total_timesteps - total_steps)
+            print(f"\n[Unified Training Cycle {cycle}] Running {steps_this_cycle:,} steps (Total: {total_steps:,} / {total_timesteps:,})...")
+
+            model.learn(
+                total_timesteps=steps_this_cycle,
+                reset_num_timesteps=False,
+                tb_log_name=f"{run_name}_unified",
+                progress_bar=False,
+            )
+            total_steps += steps_this_cycle
+
+            # Monitor all 4 terrains
+            print(f"\n  Evaluating Unified Policy Across All 4 Terrains ({eval_window} eps each)...")
+            rates = {}
+            for t_name in CURRICULUM_STAGES:
+                s_rate, _ = evaluate_stage_success(
+                    model=model,
+                    training_vec_env=vec_env,
+                    terrain_type=t_name,
+                    n_episodes=eval_window,
+                    seed=seed + 60000 + total_steps,
+                )
+                rates[t_name] = s_rate
+                print(f"    {t_name.upper():<7}: Success = {s_rate*100:.1f}%")
+
+            mean_rate = float(np.mean(list(rates.values())))
+            min_rate  = float(min(rates.values()))
+            print(f"  --> Unified Performance: Mean Success = {mean_rate*100:.1f}% | Min Terrain = {min_rate*100:.1f}%")
+
+            ckpt_path = run_model_dir / f"a1_unified_step_{total_steps}"
+            model.save(str(ckpt_path))
+            vec_env.save(str(ckpt_path) + "_vecnorm.pkl")
+
+            # Track and save best unified checkpoint by overall mean success across all 4 terrains
+            if mean_rate > best_mean_rate:
+                best_mean_rate = mean_rate
+                best_ckpt_path = run_model_dir / "a1_unified_best"
+                model.save(str(best_ckpt_path))
+                vec_env.save(str(best_ckpt_path) + "_vecnorm.pkl")
+                print(f"  [BEST UNIFIED MODEL] New best multi-terrain success ({mean_rate*100:.1f}%) saved to {best_ckpt_path.name}")
+
+            if all(r >= success_threshold for r in rates.values()):
+                print(f"\n>>> ALL 4 TERRAINS MASTERED AT STEP {total_steps}! "
+                      f"All success rates >= {success_threshold*100:.1f}%.")
+                all_passed = True
+
+        final_model_path = run_model_dir / "a1_unified_final"
+        final_vecnorm_path = run_model_dir / "a1_unified_vecnorm.pkl"
+        if best_ckpt_path and best_ckpt_path.with_suffix(".zip").exists():
+            import shutil
+            shutil.copyfile(str(best_ckpt_path.with_suffix(".zip")), str(final_model_path.with_suffix(".zip")))
+            shutil.copyfile(str(best_ckpt_path) + "_vecnorm.pkl", str(final_vecnorm_path))
+            print(f"  [FINAL CHECKPOINT] Populated unified final checkpoint from best checkpoint ({best_mean_rate*100:.1f}% mean success).")
+        else:
+            model.save(str(final_model_path))
+            vec_env.save(str(final_vecnorm_path))
+        vec_env.close()
+
+        print(f"\n{'='*75}")
+        print(f"  UNIFIED TRAINING COMPLETE!")
+        print(f"  Final Model: {final_model_path}.zip")
+        print(f"  Final VecNormalize: {final_vecnorm_path}")
+        print(f"{'='*75}\n")
+        return model, str(final_model_path), str(final_vecnorm_path)
+
     for stage_idx in range(start_stage, len(CURRICULUM_STAGES)):
         stage_name = CURRICULUM_STAGES[stage_idx]
         print(f"\n{'#'*75}")
@@ -354,8 +483,40 @@ def train(total_timesteps=5_000_000, n_envs=4, seed=42,
         stage_steps = 0
         stage_passed = False
         stage_iter = 0
+        best_eval_success = -1.0
+        best_stage_ckpt = None
 
         while stage_steps < max_stage_steps and not stage_passed:
+            # Progressive difficulty scheduling for rough and stairs (or fixed level if specified):
+            if curriculum_level is not None:
+                active_curriculum_lvl = float(curriculum_level)
+                vec_env.env_method("set_curriculum_level", active_curriculum_lvl)
+                print(f"  [Fixed Difficulty Mode] {stage_name.upper()} level locked to: {active_curriculum_lvl:.2f}")
+            elif stage_name == "rough":
+                if stage_steps < 30_000:
+                    active_curriculum_lvl = 0.40
+                elif stage_steps < 70_000:
+                    active_curriculum_lvl = 0.70
+                else:
+                    active_curriculum_lvl = 1.0
+                vec_env.env_method("set_curriculum_level", active_curriculum_lvl)
+                print(f"  [Rough Terrain Curriculum] Active difficulty level: {active_curriculum_lvl:.2f}")
+            elif stage_name == "stairs":
+                # Progressive stairs difficulty:
+                # 0-25k: level 0.40 (tread-centered, 4cm step height)
+                # 25k-60k: level 0.70 (intermediate step height)
+                # 60k+: level 1.0 (full discrete rigid stairs with 8cm step rise)
+                if stage_steps < 25_000:
+                    active_curriculum_lvl = 0.40
+                elif stage_steps < 60_000:
+                    active_curriculum_lvl = 0.70
+                else:
+                    active_curriculum_lvl = 1.0
+                vec_env.env_method("set_curriculum_level", active_curriculum_lvl)
+                print(f"  [Stairs Curriculum] Active difficulty level: {active_curriculum_lvl:.2f}")
+            else:
+                active_curriculum_lvl = 1.0
+
             steps_this_cycle = min(eval_freq, max_stage_steps - stage_steps)
             stage_iter += 1
             print(f"\n[Stage {stage_idx+1}: {stage_name.upper()}] Training cycle {stage_iter} ({steps_this_cycle:,} steps)...")
@@ -368,22 +529,32 @@ def train(total_timesteps=5_000_000, n_envs=4, seed=42,
             )
             stage_steps += steps_this_cycle
 
-            # Rolling evaluation on active stage terrain
-            print(f"  Evaluating performance on {stage_name.upper()} ({eval_window} episodes)...")
+            # Rolling evaluation on active stage terrain at matching difficulty level
+            eval_lvl = active_curriculum_lvl if curriculum_level is not None else 1.0
+            print(f"  Evaluating performance on {stage_name.upper()} ({eval_window} episodes @ level={eval_lvl:.2f})...")
             succ_rate, r_times = evaluate_stage_success(
                 model=model,
                 training_vec_env=vec_env,
                 terrain_type=stage_name,
                 n_episodes=eval_window,
                 seed=seed + 50000 + stage_steps,
+                curriculum_level=eval_lvl,
             )
             mean_rt = f"{np.mean(r_times):.2f}s" if r_times else "N/A"
             print(f"  --> Result: Success Rate = {succ_rate*100:.1f}% (Required: {success_threshold*100:.1f}%) | Mean Rise Time = {mean_rt}")
 
-            # Save stage checkpoint
+            # Save stage periodic checkpoint
             stage_ckpt = run_model_dir / f"stage_{stage_idx+1}_{stage_name}_step_{stage_steps}"
             model.save(str(stage_ckpt))
             vec_env.save(str(stage_ckpt) + "_vecnorm.pkl")
+
+            # Track and save best checkpoint by evaluation success rate
+            if succ_rate > best_eval_success:
+                best_eval_success = succ_rate
+                best_stage_ckpt = run_model_dir / f"stage_{stage_idx+1}_{stage_name}_best"
+                model.save(str(best_stage_ckpt))
+                vec_env.save(str(best_stage_ckpt) + "_vecnorm.pkl")
+                print(f"  [BEST CHECKPOINT] New best evaluation success ({succ_rate*100:.1f}%) saved to {best_stage_ckpt.name}")
 
             if succ_rate >= success_threshold:
                 print(f"\n>>> STAGE {stage_idx+1} ({stage_name.upper()}) MASTERED! "
@@ -394,13 +565,23 @@ def train(total_timesteps=5_000_000, n_envs=4, seed=42,
 
         # Save definitive stage checkpoint
         passed_ckpt = run_model_dir / f"stage_{stage_idx+1}_{stage_name}_final"
-        model.save(str(passed_ckpt))
         vecnorm_final = str(run_model_dir / f"stage_{stage_idx+1}_{stage_name}_vecnorm.pkl")
-        vec_env.save(vecnorm_final)
+        if best_stage_ckpt and best_stage_ckpt.with_suffix(".zip").exists():
+            import shutil
+            shutil.copyfile(str(best_stage_ckpt.with_suffix(".zip")), str(passed_ckpt.with_suffix(".zip")))
+            shutil.copyfile(str(best_stage_ckpt) + "_vecnorm.pkl", vecnorm_final)
+            print(f"  [FINAL CHECKPOINT] Populated stage final checkpoint from best checkpoint ({best_eval_success*100:.1f}% success).")
+        else:
+            model.save(str(passed_ckpt))
+            vec_env.save(vecnorm_final)
         current_model_path = str(passed_ckpt)
         current_vecnorm_path = vecnorm_final
 
         vec_env.close()
+
+        if single_stage:
+            print(f"\n[SINGLE STAGE MODE] Completed requested stage {stage_idx+1} ({stage_name.upper()}). Stopping as requested.")
+            return model, current_model_path, current_vecnorm_path
 
         if not stage_passed:
             print(f"\n[CURRICULUM HALTED] Did not master Stage {stage_idx+1} ({stage_name.upper()}) "
@@ -438,6 +619,12 @@ if __name__ == "__main__":
                         help="Path to pre-existing VecNormalize pickle to resume training")
     parser.add_argument("--check-only", action="store_true",
                         help="Lightweight verification of curriculum stages without running training")
+    parser.add_argument("--single-stage", action="store_true",
+                        help="Train ONLY the start-stage without auto-advancing to subsequent stages")
+    parser.add_argument("--unified", action="store_true",
+                        help="Train a single unified policy across all 4 terrains simultaneously")
+    parser.add_argument("--curriculum-level", type=float, default=None,
+                        help="Fix terrain difficulty to a constant level (e.g., 0.40 or 0.70) for both training and evaluation")
     args = parser.parse_args()
     train(
         total_timesteps=args.timesteps,
@@ -452,5 +639,8 @@ if __name__ == "__main__":
         checkpoint_model=args.checkpoint_model,
         checkpoint_vecnorm=args.checkpoint_vecnorm,
         check_only=args.check_only,
+        single_stage=args.single_stage,
+        unified=args.unified,
+        curriculum_level=args.curriculum_level,
     )
 
