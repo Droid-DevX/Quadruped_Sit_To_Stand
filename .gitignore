@@ -44,6 +44,15 @@ scratch/
 output/models/
 output/logs/
 output/videos/
+output/final_evaluation_videos/
 output/eval_results/
 output/vecnorm_stats/
 output/best_model/
+
+# Video files & media
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
