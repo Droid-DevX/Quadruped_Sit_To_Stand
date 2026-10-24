@@ -1,4 +1,43 @@
-#  Unitree A1 Quadruped Sit-to-Stand RL 
+<h1 align="center">Unitree A1 Quadruped Sit-to-Stand RL</h1>
+
+<p align="center">
+  <em>Reinforcement-learning pipeline that trains a blind Unitree A1 quadruped to rise from a ground-sitting pose to a stable stand,
+  using PPO as the high-level policy and an explicit joint-level PD controller for low-level torque control,
+  evaluated across flat, sloped, rough and stair terrains.</em>
+</p>
+
+<table align="center">
+  <tr>
+    <td align="center" width="50%">
+      <b>Flat Terrain</b><br><br>
+      <img src="assets/demo/flat.jpg" alt="Flat terrain demo" width="100%">
+    </td>
+    <td align="center" width="50%">
+      <b>Slope (10&deg;)</b><br><br>
+      <img src="assets/demo/slope.jpg" alt="Slope terrain demo" width="100%">
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <b>Rough Terrain</b><br><br>
+      <img src="assets/demo/rough.jpg" alt="Rough terrain demo" width="100%">
+    </td>
+    <td align="center" width="50%">
+      <b>Stairs (8 cm)</b><br><br>
+      <img src="assets/demo/stairs.jpg" alt="Stairs terrain demo" width="100%">
+    </td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/ALGORITHM-PPO-0075ca?style=for-the-badge" alt="PPO">
+  <img src="https://img.shields.io/badge/LOW--LEVEL%20CONTROL-PD-4c9a0b?style=for-the-badge" alt="PD">
+  <img src="https://img.shields.io/badge/SIMULATOR-MUJOCO-e8742a?style=for-the-badge" alt="MuJoCo">
+  <img src="https://img.shields.io/badge/ROBOT-UNITREE%20A1-8b008b?style=for-the-badge" alt="Unitree A1">
+</p>
+
+---
+
 
 Reinforcement learning framework that trains a **blind** Unitree A1 quadruped to rise from a ground-sitting pose (torso on or just above the ground) to a stable upright stance across multiple terrains, using **PPO** in **MuJoCo 3.x**.
 
@@ -13,7 +52,7 @@ Reinforcement learning framework that trains a **blind** Unitree A1 quadruped to
 
 ---
 
-##  System Overview
+## System Overview
 
 ```mermaid
 flowchart LR
@@ -33,7 +72,7 @@ flowchart LR
 
 ---
 
-##  Terrains and Training
+## Terrains and Training
 
 Training has two phases.
 
@@ -59,7 +98,7 @@ flowchart LR
 
 ---
 
-##  Observation Space (27-D, strictly blind)
+## Observation Space (27-D, strictly blind)
 
 ```mermaid
 flowchart LR
@@ -74,7 +113,7 @@ flowchart LR
 
 ---
 
-##  Action Space
+## Action Space
 
 - 12-D vector in `[-1, 1]`, interpreted as **residual** joint offsets on top of a nominal sit-to-stand trajectory.
 - Residual scale: **±0.25 rad** (≈ ±14.3°).
@@ -90,7 +129,7 @@ flowchart LR
 
 ---
 
-##  Reward Design
+## Reward Design
 
 | Term | Formula / gate | Weight |
 |---|---|---|
@@ -109,7 +148,8 @@ flowchart LR
 | Fall (terminal) | tilt > 60° or `h < 0.075 m` | −10.0 |
 
 ---
-##  Success Criteria
+
+## Success Criteria
 
 An episode **succeeds** when all of the following hold:
 
@@ -143,7 +183,7 @@ stateDiagram-v2
 
 ---
 
-# Domain Randomization
+## Domain Randomization
 
 Applied during training. Held-out evaluation conditions lie **outside** these ranges.
 
@@ -162,7 +202,7 @@ Applied during training. Held-out evaluation conditions lie **outside** these ra
 
 ---
 
-# Results
+## Results
 
 Evaluation setup: 5 episodes per condition, seed 42, deterministic inference, frozen normalization statistics. **Zero falls across all runs.**
 
@@ -197,7 +237,7 @@ xychart-beta
 
 ---
 
-#  Known Limitations
+## Known Limitations
 
 - **Steep slopes (18°, 20°):** failed episodes did not fall. The robot reached a valid stance at about 1.92–1.98 s, just before the 2.0 s lower rise bound, so the episode timed out.
 - **Severe roughness (50 mm):** the policy rises, but uneven footing keeps base velocities above the stability thresholds, so the stable hold lasts only about 0.39 s.
@@ -208,7 +248,7 @@ xychart-beta
 
 ---
 
-#  Project Structure
+## Project Structure
 
 ```mermaid
 flowchart TD
@@ -234,7 +274,7 @@ flowchart TD
 
 ---
 
-#  Quickstart
+## Quickstart
 
 ### 1. Verification and diagnostics
 
@@ -278,3 +318,11 @@ python src/evaluate.py --model output/best_model/best_model \
 
 Results are written to `output/eval_results/evaluation_episodes.csv` and `evaluation_summary.csv`.
 
+### 4. Video recording
+
+Record demonstrations with HUD telemetry:
+```bash
+python src/record_videos.py --model output/best_model/best_model \
+  --vecnorm output/best_model/best_model_vecnorm.pkl \
+  --terrain all --episodes 1
+```
