@@ -10,21 +10,21 @@
   <tr>
     <td align="center" width="50%">
       <b>Flat Terrain</b><br><br>
-      <img src="assets/demo/flat.jpg" alt="Flat terrain demo" width="100%">
+      <img src="assets/flat.jpg" alt="Flat terrain demo" width="100%">
     </td>
     <td align="center" width="50%">
       <b>Slope (10&deg;)</b><br><br>
-      <img src="assets/demo/slope.jpg" alt="Slope terrain demo" width="100%">
+      <img src="assets/slope.jpg" alt="Slope terrain demo" width="100%">
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
       <b>Rough Terrain</b><br><br>
-      <img src="assets/demo/rough.jpg" alt="Rough terrain demo" width="100%">
+      <img src="assets/rough.jpg" alt="Rough terrain demo" width="100%">
     </td>
     <td align="center" width="50%">
       <b>Stairs (8 cm)</b><br><br>
-      <img src="assets/demo/stairs.jpg" alt="Stairs terrain demo" width="100%">
+      <img src="assets/stairs.jpg" alt="Stairs terrain demo" width="100%">
     </td>
   </tr>
 </table>
